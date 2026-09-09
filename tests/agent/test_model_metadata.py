@@ -27,6 +27,8 @@ from agent.model_metadata import (
     get_next_probe_tier,
     get_cached_context_length,
     parse_context_limit_from_error,
+    parse_available_output_tokens_from_error,
+    is_output_cap_error,
     save_context_length,
     fetch_model_metadata,
     _MODEL_CACHE_TTL,
@@ -1472,6 +1474,31 @@ class TestParseContextLimitFromError:
         the wrong window and burned its attempts (#57275, residual claim 5)."""
         assert parse_context_limit_from_error(msg) == expected
 
+    def test_output_limit_message_is_not_a_context_limit(self):
+        """A message that talks only about an OUTPUT limit and never says
+        "context" must not be parsed as the context window. Switchyard's
+        \"max_tokens cannot exceed the configured model output limit of
+        16384\" matched the generic 'limit ... of N' pattern and got cached
+        as the context window, clamping a >100K-context model to 16K for
+        the rest of the session."""
+        msg = "max_tokens cannot exceed the configured model output limit of 16384"
+        assert parse_context_limit_from_error(msg) is None
+
+    @pytest.mark.parametrize("msg", [
+        "max_tokens cannot exceed the configured model output limit of 16384",
+        "requested max output tokens 16384 exceeds the output limit",
+    ])
+    def test_output_limit_phrasing_variants_are_not_context_limits(self, msg):
+        assert parse_context_limit_from_error(msg) is None
+
+    def test_genuine_context_message_still_parses(self):
+        """The bailout only fires when the message has no 'context' at all —
+        real context-length errors (which always say 'context') must keep
+        parsing exactly as before."""
+        msg = "This model's maximum context length is 32768 tokens"
+        assert parse_context_limit_from_error(msg) == 32768
+
+
     def test_google_supports_up_to_recalibrates_window(self):
         from agent.model_metadata import get_context_length_from_provider_error
 
@@ -1498,6 +1525,22 @@ class TestParseContextLimitFromError:
 # =========================================================================
 # Persistent context length cache
 # =========================================================================
+
+
+class TestOutputLimitClassification:
+    """The 'output limit' phrasing (Switchyard-style proxies) must be classified
+    as an output-cap error, not silently unclassified, so the overflow-recovery
+    path retries with a smaller max_tokens instead of shrinking the context."""
+
+    def test_parses_available_output_tokens(self):
+        msg = "max_tokens cannot exceed the configured model output limit of 16384"
+        assert parse_available_output_tokens_from_error(msg) == 16384
+
+    def test_is_output_cap_error(self):
+        msg = "max_tokens cannot exceed the configured model output limit of 16384"
+        assert is_output_cap_error(msg) is True
+
+
 
 class TestContextLengthCache:
 
